@@ -1,7 +1,5 @@
 # Minerva-OPT
 
-[![Auto Release](https://github.com/gabrielbg0/Minerva-OPT/actions/workflows/auto-release.yml/badge.svg)](https://github.com/gabrielbg0/Minerva-OPT/actions/workflows/auto-release.yml)
-
 Hyperparameter optimization extensions for [Minerva](https://github.com/discovery-unicamp/Minerva), powered by [Ray Tune](https://docs.ray.io/en/latest/tune/index.html).
 
 ## Description
