@@ -31,7 +31,7 @@ requires-python = ">=3.10"
 version = "0.1.0"
 
 dependencies = [
-    "minerva-ml>=0.3.5",
+    "minerva==0.3.10-beta",
     "ray[tune]>=2.9",
     "hyperopt>=0.2.7",
 ]

@@ -31,8 +31,9 @@ class RayHyperParameterSearch(Pipeline):
         search_space: Dict[str, Any],
         log_dir: Optional[PathLike] = None,
         save_run_status: bool = True,
+        seed: Optional[int] = None,
     ):
-        super().__init__(log_dir=log_dir, save_run_status=save_run_status)
+        super().__init__(log_dir=log_dir, save_run_status=save_run_status, seed=seed)
         self.model = model
         self.search_space = search_space
 
@@ -61,7 +62,7 @@ class RayHyperParameterSearch(Pipeline):
 
         def _train_func(config):
             dm = deepcopy(data)
-            model = self.model.create_from_dict(config)
+            model = self.model(**config)
             trainer = L.Trainer(
                 max_epochs=max_epochs,
                 devices=devices,
