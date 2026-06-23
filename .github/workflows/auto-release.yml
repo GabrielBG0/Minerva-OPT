@@ -1,0 +1,105 @@
+name: Auto Release
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  auto-release:
+    name: Check version and release
+    runs-on: ubuntu-latest
+    environment: pypi
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          python-version: "3.10"
+
+      - name: Get version from pyproject.toml
+        id: pyproject_version
+        run: |
+          VERSION=$(grep -m1 '^version\s*=' pyproject.toml | sed 's/.*=\s*"\(.*\)"/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Skip if release tag already exists
+        id: tag_check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.pyproject_version.outputs.version }}
+        run: |
+          if gh release view "v${VERSION}" &>/dev/null 2>&1; then
+            echo "Release v${VERSION} already exists, skipping."
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get latest release version
+        if: steps.tag_check.outputs.exists == 'false'
+        id: latest_version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          LATEST=$(gh release list --limit 100 --json tagName --jq '.[].tagName' | sed 's/^v//' | sort -V | tail -1)
+          echo "latest=${LATEST:-0.0.0}" >> $GITHUB_OUTPUT
+
+      - name: Check if pyproject version is newer than latest release
+        if: steps.tag_check.outputs.exists == 'false'
+        id: version_check
+        env:
+          VERSION: ${{ steps.pyproject_version.outputs.version }}
+          LATEST: ${{ steps.latest_version.outputs.latest }}
+        run: |
+          uv run --with packaging python -c "
+          import re, sys, os
+          from packaging.version import Version
+
+          def normalize(v):
+              v = re.sub(r'-beta(?:\.(\d+))?$', lambda m: f'b{m.group(1) or \"0\"}', v)
+              v = re.sub(r'-alpha(?:\.(\d+))?$', lambda m: f'a{m.group(1) or \"0\"}', v)
+              v = re.sub(r'-rc(?:\.(\d+))?$', lambda m: f'rc{m.group(1) or \"0\"}', v)
+              return v
+
+          current = normalize(os.environ['VERSION'])
+          latest = normalize(os.environ.get('LATEST', '0.0.0'))
+          try:
+              is_newer = Version(current) > Version(latest)
+          except Exception as e:
+              print(f'Version comparison failed: {e}', file=sys.stderr)
+              sys.exit(1)
+          print(f'is_newer={str(is_newer).lower()}')
+          " >> $GITHUB_OUTPUT
+
+      - name: Build package
+        if: steps.tag_check.outputs.exists == 'false' && steps.version_check.outputs.is_newer == 'true'
+        run: uv build
+
+      - name: Create GitHub Release
+        if: steps.tag_check.outputs.exists == 'false' && steps.version_check.outputs.is_newer == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.pyproject_version.outputs.version }}
+        run: |
+          gh release create "v${VERSION}" \
+            --title "v${VERSION}" \
+            --generate-notes \
+            dist/*
+
+      - name: Publish to PyPI
+        if: steps.tag_check.outputs.exists == 'false' && steps.version_check.outputs.is_newer == 'true'
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
