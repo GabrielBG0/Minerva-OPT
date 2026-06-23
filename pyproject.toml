@@ -1,0 +1,53 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools>=70.0.0"]
+
+[project]
+authors = [
+    { name = "Gabriel Gutierrez", email = "gabriel.bgs00@gmail.com" },
+]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+description = "Hyperparameter optimization extensions for Minerva."
+keywords = [
+    "Deep Learning",
+    "Hyperparameter Optimization",
+    "Machine Learning",
+    "Pytorch",
+    "Ray Tune",
+    "Research",
+]
+license = { file = "LICENSE" }
+name = "minerva-opt"
+readme = "README.md"
+requires-python = ">=3.10"
+version = "0.1.0"
+
+dependencies = [
+    "minerva-ml>=0.3.5",
+    "ray[tune]>=2.9",
+    "hyperopt>=0.2.7",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["minerva_opt*"]
+
+[project.optional-dependencies]
+dev = [
+    "black",
+    "flake8",
+    "pytest",
+    "pytest-coverage",
+]
+
+[project.urls]
+"Bug Tracker" = "https://github.com/discovery-unicamp/Minerva-OPT/issues"
+"Homepage" = "https://github.com/discovery-unicamp/Minerva-OPT"
