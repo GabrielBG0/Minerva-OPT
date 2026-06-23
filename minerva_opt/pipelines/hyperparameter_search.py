@@ -1,7 +1,11 @@
+import logging
+import os
+import warnings
 from copy import deepcopy
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 import lightning.pytorch as L
+import torch
 from lightning.pytorch.strategies import Strategy
 from ray import tune
 from ray.train import CheckpointConfig, RunConfig, ScalingConfig
@@ -15,6 +19,8 @@ from ray.tune.search.searcher import Searcher
 from minerva.pipelines.base import Pipeline
 from minerva.utils.typing import PathLike
 from minerva_opt.callbacks.ray_callbacks import TrainerReportOnIntervalCallback
+
+logger = logging.getLogger(__name__)
 
 
 class RayHyperParameterSearch(Pipeline):
@@ -36,6 +42,7 @@ class RayHyperParameterSearch(Pipeline):
         super().__init__(log_dir=log_dir, save_run_status=save_run_status, seed=seed)
         self.model = model
         self.search_space = search_space
+        self._last_results: Optional[ResultGrid] = None
 
     def _search(
         self,
@@ -58,10 +65,14 @@ class RayHyperParameterSearch(Pipeline):
         max_concurrent: int = 4,
         max_epochs: int = 100,
         checkpoint_interval: int = 1,
+        data_factory: Optional[Callable[[], L.LightningDataModule]] = None,
+        resources_per_worker: Optional[Dict[str, float]] = None,
+        num_checkpoints_to_keep: int = 1,
+        restore_path: Optional[PathLike] = None,
     ) -> ResultGrid:
 
         def _train_func(config):
-            dm = deepcopy(data)
+            dm = data_factory() if data_factory is not None else deepcopy(data)
             model = self.model(**config)
             trainer = L.Trainer(
                 max_epochs=max_epochs,
@@ -85,16 +96,30 @@ class RayHyperParameterSearch(Pipeline):
             grace_period=max(1, max_epochs // 10),
         )
 
-        scaling_config = scaling_config or ScalingConfig(
-            num_workers=1, use_gpu=True, resources_per_worker={"GPU": 1}
-        )
+        if scaling_config is None:
+            if torch.cuda.is_available():
+                scaling_config = ScalingConfig(
+                    num_workers=1,
+                    use_gpu=True,
+                    resources_per_worker=resources_per_worker or {"GPU": 1},
+                )
+            else:
+                warnings.warn(
+                    "No GPU detected. Falling back to CPU for ScalingConfig. "
+                    "Pass an explicit scaling_config to suppress this warning "
+                    "or to configure GPU usage.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                scaling_config = ScalingConfig(num_workers=1, use_gpu=False)
 
         run_config = run_config or RunConfig(
+            storage_path=str(self.log_dir),
             checkpoint_config=CheckpointConfig(
-                num_to_keep=1,
+                num_to_keep=num_checkpoints_to_keep,
                 checkpoint_score_attribute=tuner_metric,
                 checkpoint_score_order=tuner_mode,
-            )
+            ),
         )
 
         if search_alg is not None:
@@ -106,47 +131,82 @@ class RayHyperParameterSearch(Pipeline):
             run_config=run_config,
         )
 
-        tuner = tune.Tuner(
-            ray_trainer,
-            param_space={"train_loop_config": self.search_space},
-            tune_config=tune.TuneConfig(
-                metric=tuner_metric,
-                mode=tuner_mode,
-                num_samples=num_samples,
-                scheduler=scheduler,
-                search_alg=search_alg,
-            ),
-        )
+        if restore_path is not None:
+            tuner = tune.Tuner.restore(
+                path=str(restore_path),
+                trainable=ray_trainer,
+                resume_unfinished=True,
+                resume_errored=False,
+            )
+        else:
+            tuner = tune.Tuner(
+                ray_trainer,
+                param_space={"train_loop_config": self.search_space},
+                tune_config=tune.TuneConfig(
+                    metric=tuner_metric,
+                    mode=tuner_mode,
+                    num_samples=num_samples,
+                    scheduler=scheduler,
+                    search_alg=search_alg,
+                ),
+            )
 
         results = tuner.fit()
+        self._last_results = results
+
         best = results.get_best_result()
-        print(f"Best config: {best.config}")
-        print(f"Best {tuner_metric}: {best.metrics.get(tuner_metric)}")
+        logger.info("Best config: %s", best.config)
+        logger.info("Best %s: %s", tuner_metric, best.metrics.get(tuner_metric))
         return results
 
-    def _test(self, data: L.LightningDataModule, ckpt_path: Optional[PathLike]) -> Any:
-        raise NotImplementedError(
-            "Load the best checkpoint from the ResultGrid returned by _search "
-            "and call trainer.test() directly."
-        )
+    def _test(
+        self,
+        data: L.LightningDataModule,
+        ckpt_path: Optional[PathLike] = None,
+        accelerator: str = "auto",
+        devices: str = "auto",
+        callbacks: Optional[List[Any]] = None,
+    ) -> Any:
+        if ckpt_path is not None:
+            model = self.model.load_from_checkpoint(ckpt_path)
+            trainer = L.Trainer(accelerator=accelerator, devices=devices, callbacks=callbacks)
+            return trainer.test(model, datamodule=data)
+
+        if self._last_results is None:
+            raise RuntimeError(
+                "No search results available. Run _search first or provide an explicit ckpt_path."
+            )
+
+        best = self._last_results.get_best_result()
+        with best.checkpoint.as_directory() as checkpoint_dir:
+            best_ckpt = os.path.join(
+                checkpoint_dir, TrainerReportOnIntervalCallback.CHECKPOINT_NAME
+            )
+            model = self.model.load_from_checkpoint(best_ckpt)
+
+        trainer = L.Trainer(accelerator=accelerator, devices=devices, callbacks=callbacks)
+        return trainer.test(model, datamodule=data)
 
     def _run(
         self,
         data: L.LightningDataModule,
         task: Optional[Literal["search", "test"]] = None,
         ckpt_path: Optional[PathLike] = None,
+        data_factory: Optional[Callable[[], L.LightningDataModule]] = None,
         **kwargs,
     ) -> Any:
         if task == "search" or task is None:
-            return self._search(data, ckpt_path, **kwargs)
+            return self._search(data, ckpt_path, data_factory=data_factory, **kwargs)
         elif task == "test":
-            return self._test(data, ckpt_path)
+            return self._test(data, ckpt_path, **kwargs)
+        else:
+            raise ValueError(f"Unknown task {task!r}. Expected 'search' or 'test'.")
 
 
 def main():
     from jsonargparse import CLI
 
-    print("Hyper Searching")
+    logger.info("Hyper Searching")
     CLI(RayHyperParameterSearch, as_positional=False)
 
 

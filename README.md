@@ -1,5 +1,7 @@
 # Minerva-OPT
 
+[![Auto Release](https://github.com/gabrielbg0/Minerva-OPT/actions/workflows/auto-release.yml/badge.svg)](https://github.com/gabrielbg0/Minerva-OPT/actions/workflows/auto-release.yml)
+
 Hyperparameter optimization extensions for [Minerva](https://github.com/discovery-unicamp/Minerva), powered by [Ray Tune](https://docs.ray.io/en/latest/tune/index.html).
 
 ## Description
@@ -12,7 +14,7 @@ Minerva-OPT provides a `RayHyperParameterSearch` pipeline that wraps Ray Tune an
 - **Flexible search algorithms**: use Ray Tune's default random/grid search or pass any `ray.tune.search.Searcher` (e.g. `HyperOptSearch` for Bayesian optimization).
 - **ASHA early stopping**: trials are stopped early based on intermediate results; `grace_period` and `max_t` are derived automatically from `max_epochs`.
 - **Distributed training**: uses `RayDDPStrategy` and `RayLightningEnvironment` for multi-worker trials.
-- **Checkpointing**: keeps only the best checkpoint per trial, scored on the target metric.
+- **Checkpointing**: configurable number of checkpoints per trial, scored on the target metric.
 
 ## Installation
 
@@ -28,6 +30,12 @@ uv pip install minerva-opt
 
 ```bash
 pip install minerva-opt
+```
+
+To use Bayesian optimization via HyperOpt, install the optional extra:
+
+```bash
+pip install "minerva-opt[hyperopt]"
 ```
 
 ## Usage
@@ -80,29 +88,67 @@ results = pipeline.run(
 )
 ```
 
+### Testing the best model after search
+
+```python
+# Run search first, then test using the best checkpoint automatically
+results = pipeline.run(data=my_data_module, num_samples=20, max_epochs=50)
+pipeline.run(data=my_data_module, task="test")
+
+# Or test from an explicit checkpoint path
+pipeline.run(data=my_data_module, task="test", ckpt_path="path/to/model.ckpt")
+```
+
+### Resuming an interrupted search
+
+```python
+# Resume from the Ray experiment directory saved under log_dir
+pipeline.run(
+    data=my_data_module,
+    restore_path="logs/TorchTrainer_2024-01-01_00-00-00",
+)
+```
+
+### Using a data factory (recommended for long searches)
+
+Passing a factory callable avoids deepcopying the data module for every trial, which is safer for data modules with file handles or non-picklable state:
+
+```python
+pipeline.run(
+    data=my_data_module,         # still required for _test
+    data_factory=lambda: MyDataModule(root="data/"),
+)
+```
+
 ### Key `run()` parameters
 
-| Parameter             | Default      | Description                                            |
-| --------------------- | ------------ | ------------------------------------------------------ |
-| `data`                | —            | `LightningDataModule` to train on                      |
-| `task`                | `"search"`   | `"search"` to run the sweep                            |
-| `ckpt_path`           | `None`       | Resume training from a checkpoint                      |
-| `num_samples`         | `10`         | Number of trials to run                                |
-| `max_epochs`          | `100`        | Max epochs per trial                                   |
-| `tuner_metric`        | `"val_loss"` | Metric to optimize                                     |
-| `tuner_mode`          | `"min"`      | `"min"` or `"max"`                                     |
-| `search_alg`          | `None`       | Any `ray.tune.search.Searcher`; `None` = random search |
-| `max_concurrent`      | `4`          | Max concurrent trials (when using a `search_alg`)      |
-| `scheduler`           | ASHA         | Override the trial scheduler                           |
-| `scaling_config`      | 1 GPU/worker | Override Ray `ScalingConfig`                           |
-| `checkpoint_interval` | `1`          | Save a checkpoint every N epochs                       |
-| `debug_mode`          | `False`      | Disable checkpointing for fast iteration               |
+| Parameter                | Default                        | Description                                                          |
+| ------------------------ | ------------------------------ | -------------------------------------------------------------------- |
+| `data`                   | —                              | `LightningDataModule` for training and testing                       |
+| `task`                   | `"search"`                     | `"search"` to run the sweep, `"test"` to evaluate best checkpoint    |
+| `ckpt_path`              | `None`                         | Warm-start all trials from a checkpoint (search) or eval path (test) |
+| `data_factory`           | `None`                         | Callable that returns a fresh `LightningDataModule` per trial        |
+| `num_samples`            | `10`                           | Number of trials to run                                              |
+| `max_epochs`             | `100`                          | Max epochs per trial                                                 |
+| `tuner_metric`           | `"val_loss"`                   | Metric to optimize                                                   |
+| `tuner_mode`             | `"min"`                        | `"min"` or `"max"`                                                   |
+| `search_alg`             | `None`                         | Any `ray.tune.search.Searcher`; `None` = random search               |
+| `max_concurrent`         | `4`                            | Max concurrent trials (when using a `search_alg`)                    |
+| `scheduler`              | ASHA                           | Override the trial scheduler                                         |
+| `scaling_config`         | Auto-detected (GPU or CPU)     | Override Ray `ScalingConfig`                                         |
+| `resources_per_worker`   | `{"GPU": 1}` when GPU detected | Custom resource dict, e.g. `{"GPU": 0.5}` for fractional GPU        |
+| `checkpoint_interval`    | `1`                            | Save a checkpoint every N epochs                                     |
+| `num_checkpoints_to_keep`| `1`                            | Number of top checkpoints to retain per trial                        |
+| `restore_path`           | `None`                         | Path to a Ray experiment dir to resume an interrupted search         |
+| `debug_mode`             | `False`                        | Disable checkpointing for fast iteration                             |
+
+> **GPU detection**: when `scaling_config` is not provided, the pipeline auto-detects GPU availability. A `UserWarning` is emitted if falling back to CPU. Pass an explicit `scaling_config` to suppress it.
 
 ## Requirements
 
 - `minerva >= 0.3.10b0`
 - `ray[tune] >= 2.55`
-- `hyperopt >= 0.2.7`
+- `hyperopt >= 0.2.7` *(optional — only needed for `HyperOptSearch`)*
 
 ## License
 

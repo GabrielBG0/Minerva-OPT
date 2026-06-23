@@ -5,8 +5,18 @@ from pathlib import Path
 
 import lightning.pytorch as L
 from ray import train
-from ray._common.usage.usage_lib import TagKey, record_extra_usage_tag
 from ray.train import Checkpoint
+
+try:
+    from ray._common.usage.usage_lib import TagKey, record_extra_usage_tag
+
+    def _record_usage():
+        record_extra_usage_tag(TagKey.TRAIN_LIGHTNING_RAYTRAINREPORTCALLBACK, "1")
+
+except ImportError:
+
+    def _record_usage():
+        pass
 
 
 class TrainerReportOnIntervalCallback(L.Callback):
@@ -23,11 +33,13 @@ class TrainerReportOnIntervalCallback(L.Callback):
         if os.path.isdir(self.tmpdir_prefix) and self.local_rank == 0:
             shutil.rmtree(self.tmpdir_prefix)
 
-        record_extra_usage_tag(TagKey.TRAIN_LIGHTNING_RAYTRAINREPORTCALLBACK, "1")
+        _record_usage()
 
-    def on_train_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+    def on_train_epoch_end(
+        self, trainer: L.Trainer, pl_module: L.LightningModule
+    ) -> None:
         metrics = trainer.callback_metrics
-        metrics = {k: v.item() for k, v in metrics.items()}
+        metrics = {k: v.item() if hasattr(v, "item") else float(v) for k, v in metrics.items()}
         metrics["epoch"] = trainer.current_epoch
         metrics["step"] = trainer.global_step
 
@@ -62,11 +74,13 @@ class TrainerReportKeepOnlyLastCallback(L.Callback):
         if os.path.isdir(self.tmpdir_prefix) and self.local_rank == 0:
             shutil.rmtree(self.tmpdir_prefix)
 
-        record_extra_usage_tag(TagKey.TRAIN_LIGHTNING_RAYTRAINREPORTCALLBACK, "1")
+        _record_usage()
 
-    def on_train_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+    def on_train_epoch_end(
+        self, trainer: L.Trainer, pl_module: L.LightningModule
+    ) -> None:
         metrics = trainer.callback_metrics
-        metrics = {k: v.item() for k, v in metrics.items()}
+        metrics = {k: v.item() if hasattr(v, "item") else float(v) for k, v in metrics.items()}
         metrics["epoch"] = trainer.current_epoch
         metrics["step"] = trainer.global_step
 

@@ -1803,10 +1803,9 @@ wheels = [
 
 [[package]]
 name = "minerva-opt"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
-    { name = "hyperopt" },
     { name = "minerva" },
     { name = "ray", extra = ["tune"] },
 ]
@@ -1818,18 +1817,21 @@ dev = [
     { name = "pytest" },
     { name = "pytest-coverage" },
 ]
+hyperopt = [
+    { name = "hyperopt" },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "black", marker = "extra == 'dev'" },
     { name = "flake8", marker = "extra == 'dev'" },
-    { name = "hyperopt", specifier = ">=0.2.7" },
+    { name = "hyperopt", marker = "extra == 'hyperopt'", specifier = ">=0.2.7" },
     { name = "minerva", specifier = "==0.3.10b0" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-coverage", marker = "extra == 'dev'" },
-    { name = "ray", extras = ["tune"], specifier = ">=2.9" },
+    { name = "ray", extras = ["tune"], specifier = ">=2.55" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["hyperopt", "dev"]
 
 [[package]]
 name = "mpmath"
