@@ -391,33 +391,26 @@ class TestAblationScalingConfig:
 
 class TestAblationEarlyStopping:
     def test_default_scheduler_grace_period_equals_max_epochs(self):
-        from minerva_opt.pipelines.ablation_study import AblationStudyPipeline
-
         p = _make_pipeline()
         mock_results = MagicMock()
         mock_results.__iter__ = MagicMock(return_value=iter([]))
-        captured = {}
-
-        def fake_tuner(trainable, param_space, tune_config):
-            captured["tune_config"] = tune_config
-            m = MagicMock()
-            m.fit.return_value = mock_results
-            return m
 
         with (
             patch("torch.cuda.is_available", return_value=False),
             patch("minerva_opt.pipelines.ablation_study.TorchTrainer"),
             patch("minerva_opt.pipelines.ablation_study.tune") as mock_tune,
+            patch("minerva_opt.pipelines.ablation_study.ASHAScheduler") as mock_asha,
             warnings.catch_warnings(),
         ):
             warnings.simplefilter("ignore", UserWarning)
-            mock_tune.Tuner.side_effect = fake_tuner
+            mock_tune.Tuner.return_value.fit.return_value = mock_results
             mock_tune.TuneConfig = tune.TuneConfig
             mock_tune.grid_search = tune.grid_search
             p._ablate(MagicMock(), ckpt_path=None, max_epochs=50)
 
-        scheduler = captured["tune_config"].scheduler
-        assert scheduler._grace_period == 50
+        _, kwargs = mock_asha.call_args
+        assert kwargs["grace_period"] == 50
+        assert kwargs["max_t"] == 50
 
 
 # ---------------------------------------------------------------------------
