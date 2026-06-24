@@ -1,0 +1,62 @@
+name: Deploy Docs
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Allow only one concurrent deployment; cancel any in-progress run.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Build
+  # -------------------------------------------------------------------------
+  build:
+    name: Build docs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          python-version: "3.10"
+
+      - name: Install docs dependencies
+        run: uv sync --extra docs
+
+      - name: Build HTML docs
+        run: uv run sphinx-build docs docs/_build/html -b html -W --keep-going
+
+      - name: Upload pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/_build/html
+
+  # -------------------------------------------------------------------------
+  # Deploy
+  # -------------------------------------------------------------------------
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

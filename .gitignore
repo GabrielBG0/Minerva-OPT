@@ -48,6 +48,9 @@ ray_results/
 .ipynb_checkpoints/
 *.ipynb
 
+# Docs build output
+docs/_build/
+
 # Logs
 *.log
 logs/

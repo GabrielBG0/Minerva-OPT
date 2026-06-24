@@ -47,7 +47,13 @@ dev = [
     "pytest",
     "pytest-coverage",
 ]
+docs = [
+    "sphinx>=7.0",
+    "furo>=2023.9.10",
+    "sphinx-autodoc-typehints>=1.25",
+]
 
 [project.urls]
 "Bug Tracker" = "https://github.com/gabrielbg0/Minerva-OPT/issues"
 "Homepage" = "https://github.com/gabrielbg0/Minerva-OPT"
+"Documentation" = "https://gabrielbg0.github.io/Minerva-OPT"

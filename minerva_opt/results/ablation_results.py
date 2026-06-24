@@ -6,10 +6,22 @@ if TYPE_CHECKING:
 
 
 class AblationResults:
-    """Wrapper around Ray's ResultGrid providing ablation-specific analysis.
+    """Wrapper around Ray's ``ResultGrid`` providing ablation-specific analysis.
 
-    Aggregates results across seeds per condition, computes deltas vs baseline,
-    and provides checkpoint access per condition.
+    Aggregates trial results across seeds per condition, computes metric deltas
+    relative to the baseline condition, and provides checkpoint access per
+    condition.
+
+    Attributes
+    ----------
+    _grid : ResultGrid
+        Underlying Ray ``ResultGrid`` containing all trial results.
+    _condition_names : list of str
+        Ordered list of condition names (baseline first).
+    _metric : str
+        Primary metric name used for ranking and delta computation.
+    _mode : str
+        ``"min"`` or ``"max"`` — optimisation direction for ``_metric``.
     """
 
     def __init__(
@@ -19,6 +31,20 @@ class AblationResults:
         metric: str,
         mode: str,
     ):
+        """
+        Parameters
+        ----------
+        result_grid : ray.tune.result_grid.ResultGrid
+            Full grid of trial results produced by ``tune.Tuner.fit()``.
+        condition_names : list of str
+            Ordered list of condition names used to index the results
+            (baseline must be first).
+        metric : str
+            Name of the primary evaluation metric.
+        mode : str
+            ``"min"`` if lower values of ``metric`` are better; ``"max"``
+            otherwise.
+        """
         self._grid = result_grid
         self._condition_names = condition_names
         self._metric = metric
@@ -26,14 +52,29 @@ class AblationResults:
 
     @property
     def raw(self) -> "ResultGrid":
-        """Underlying ResultGrid for direct Ray API access."""
+        """Underlying ``ResultGrid`` for direct Ray API access.
+
+        Returns
+        -------
+        ray.tune.result_grid.ResultGrid
+            The unmodified result grid produced by ``tune.Tuner.fit()``.
+        """
         return self._grid
 
     def summary(self) -> "pd.DataFrame":
-        """DataFrame of mean ± std per condition across seeds.
+        """Compute mean and standard deviation of all metrics per condition.
 
-        Rows are conditions in declaration order (baseline first).
-        Columns are ``{metric}_mean`` and ``{metric}_std`` for all logged metrics.
+        Each row corresponds to one condition in declaration order (baseline
+        first).  Columns are named ``{metric}_mean`` and ``{metric}_std`` for
+        every numeric metric that was logged by at least one trial.  Failed
+        trials are excluded from the aggregation.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Index: condition names.  Columns: ``{metric}_mean`` and
+            ``{metric}_std``.  An empty ``DataFrame`` is returned when no
+            successful trial results are available.
         """
         import pandas as pd
 
@@ -55,10 +96,28 @@ class AblationResults:
         return agg.reindex(self._condition_names)
 
     def delta_from_baseline(self, metric: Optional[str] = None) -> "pd.Series":
-        """Per-condition improvement vs baseline on ``metric``.
+        """Compute per-condition improvement relative to the baseline.
 
-        Positive values mean the condition is *better* than baseline
-        (lower loss for ``mode='min'``, higher score for ``mode='max'``).
+        Positive values mean the condition performs *better* than baseline —
+        lower mean loss for ``mode='min'``, higher mean score for
+        ``mode='max'``.
+
+        Parameters
+        ----------
+        metric : str or None, optional
+            Metric to use for the comparison.  Defaults to the metric
+            supplied at construction time (``self._metric``).
+
+        Returns
+        -------
+        pandas.Series
+            Index: condition names.  Values: signed delta versus the baseline
+            mean.  Series name is ``"delta_{metric}_vs_baseline"``.
+
+        Raises
+        ------
+        KeyError
+            If the requested metric is not present in ``summary()`` columns.
         """
         metric = metric or self._metric
         df = self.summary()
@@ -76,7 +135,28 @@ class AblationResults:
         return delta
 
     def best_checkpoint(self, condition: str) -> Any:
-        """Best Ray Checkpoint for ``condition`` (seed with best tuner metric)."""
+        """Retrieve the best checkpoint for a given condition.
+
+        Among all seeds for the condition, the seed whose final reported
+        ``self._metric`` value is optimal (min or max, per ``self._mode``)
+        is selected and its checkpoint is returned.
+
+        Parameters
+        ----------
+        condition : str
+            Name of the ablation condition (e.g. ``"baseline"`` or a key
+            from the ``ablations`` dict).
+
+        Returns
+        -------
+        ray.train.Checkpoint
+            Ray checkpoint object for the winning seed of ``condition``.
+
+        Raises
+        ------
+        ValueError
+            If no successful trial results exist for ``condition``.
+        """
         condition_results = [
             r
             for r in self._grid
