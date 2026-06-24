@@ -5,10 +5,6 @@ This tutorial walks you through ``minerva-opt`` from a minimal working example
 to advanced configuration.  It covers both :class:`RayHyperParameterSearch`
 (hyperparameter sweeps) and :class:`AblationStudyPipeline` (ablation studies).
 
-.. contents:: Contents
-   :local:
-   :depth: 2
-
 
 1. Prerequisites & installation
 --------------------------------
@@ -657,11 +653,36 @@ non-copyable state.  The ``data_factory`` parameter solves this:
    When running ``task="test"``, the ``data`` argument is used directly.
 
 
-14. Running an ablation study
-------------------------------
+14. Ablation studies
+---------------------
 
-:class:`AblationStudyPipeline` runs every named condition (plus the baseline)
-across multiple seeds so each component's contribution can be measured.
+:class:`AblationStudyPipeline` measures the contribution of individual model
+components by training a full-model *baseline* alongside a set of named
+*ablation conditions* — each one being the baseline with one or more components
+removed or altered.  Every condition is trained over multiple independent seeds
+so you get statistically robust estimates rather than single-run noise.
+
+How conditions are built
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+You supply a ``baseline_config`` (the complete hyperparameter dict for your
+full model) and an ``ablations`` dict that maps condition names to *override
+dicts*.  The pipeline merges them automatically::
+
+   baseline_config = {"lr": 1e-3, "dropout": 0.2, "use_attention": True, "hidden_size": 128}
+   ablations       = {"no_attention": {"use_attention": False}}
+
+   # Internally the pipeline builds:
+   conditions = {
+       "baseline":     {"lr": 1e-3, "dropout": 0.2, "use_attention": True,  "hidden_size": 128},
+       "no_attention": {"lr": 1e-3, "dropout": 0.2, "use_attention": False, "hidden_size": 128},
+   }
+
+The key ``"baseline"`` is reserved — passing it inside ``ablations`` raises a
+``ValueError``.
+
+Minimal example
+~~~~~~~~~~~~~~~~
 
 .. code-block:: python
 
@@ -692,56 +713,276 @@ across multiple seeds so each component's contribution can be measured.
        tuner_mode="min",
    )
 
-Analysing ablation results
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
+This schedules **4 conditions × 5 seeds = 20 trials**.  Unlike the
+hyperparameter search pipeline, the ASHA scheduler is configured with
+``grace_period=max_epochs`` so **no trial is pruned early** — every condition
+always trains to completion.
 
-``pipeline.run()`` returns an :class:`~minerva_opt.results.ablation_results.AblationResults`
-object:
+Key ``run()`` parameters
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 20 52
+
+   * - Parameter
+     - Default
+     - Description
+   * - ``data``
+     - —
+     - ``LightningDataModule`` instance
+   * - ``task``
+     - ``"ablate"``
+     - ``"ablate"`` to run the study; ``"test"`` to evaluate a condition
+   * - ``num_seeds``
+     - ``5``
+     - Number of independent seeds per condition
+   * - ``max_epochs``
+     - ``100``
+     - Training epochs per trial (no early stopping)
+   * - ``tuner_metric``
+     - ``"val_loss"``
+     - Metric logged by the model and used to rank seeds
+   * - ``tuner_mode``
+     - ``"min"``
+     - ``"min"`` or ``"max"``
+   * - ``ckpt_path``
+     - ``None``
+     - Optional warm-start checkpoint forwarded to ``trainer.fit``
+   * - ``devices``
+     - ``"auto"``
+     - Forwarded to the Lightning ``Trainer``
+   * - ``accelerator``
+     - ``"auto"``
+     - Forwarded to the Lightning ``Trainer``
+   * - ``scaling_config``
+     - Auto-detected
+     - Ray ``ScalingConfig`` — same GPU auto-detection as the search pipeline
+   * - ``run_config``
+     - —
+     - Ray ``RunConfig``; defaults to saving under ``log_dir``
+   * - ``scheduler``
+     - ASHA (no pruning)
+     - Override the scheduler; default sets ``grace_period=max_epochs``
+   * - ``checkpoint_interval``
+     - ``1``
+     - Save a checkpoint every N epochs within each trial
+   * - ``num_checkpoints_to_keep``
+     - ``1``
+     - Number of checkpoints retained per trial
+   * - ``debug_mode``
+     - ``False``
+     - Disables checkpointing for fast development iteration
+   * - ``data_factory``
+     - ``None``
+     - Callable returning a fresh data module per trial
+   * - ``resources_per_worker``
+     - ``{"GPU": 1}``
+     - GPU resource dict used when auto-creating ``ScalingConfig``
+
+How seeding works
+~~~~~~~~~~~~~~~~~~
+
+Each trial's seed is ``(pipeline.seed or 0) + seed_offset`` where
+``seed_offset`` runs from ``0`` to ``num_seeds - 1``.  Setting ``seed`` on the
+pipeline makes the entire study reproducible:
 
 .. code-block:: python
 
-   # Mean ± std per condition across seeds
-   print(results.summary())
-   #                   val_loss_mean  val_loss_std
-   # baseline                  0.21          0.01
-   # no_attention              0.27          0.02
-   # high_dropout              0.23          0.01
-   # small_model               0.25          0.02
+   # seed=0 → trial seeds 0, 1, 2, 3, 4
+   # seed=10 → trial seeds 10, 11, 12, 13, 14
+   pipeline = AblationStudyPipeline(..., seed=0)
 
-   # Signed improvement vs baseline (positive = better)
-   print(results.delta_from_baseline())
+The seed is applied via ``L.seed_everything(seed, workers=True)`` inside each
+trial, covering model weight initialisation, data shuffling, and dropout.
+
+Analysing results — ``AblationResults``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``pipeline.run(task="ablate")`` returns an
+:class:`~minerva_opt.results.ablation_results.AblationResults` object that
+wraps Ray's ``ResultGrid`` with ablation-specific aggregation.
+
+``summary()``
+^^^^^^^^^^^^^
+
+Returns a ``pandas.DataFrame`` with one row per condition and columns
+``{metric}_mean`` / ``{metric}_std`` for every numeric metric that was logged.
+Conditions appear in declaration order (baseline first).  Failed trials are
+silently excluded.
+
+.. code-block:: python
+
+   df = results.summary()
+   print(df)
+   #                val_loss_mean  val_loss_std  epoch_mean  ...
+   # baseline                0.21          0.01        30.0
+   # no_attention            0.27          0.02        30.0
+   # high_dropout            0.23          0.01        30.0
+   # small_model             0.25          0.02        30.0
+
+All metrics logged by the model appear as columns, so you can inspect
+``train_loss``, ``epoch``, and any custom metrics alongside ``val_loss``.
+
+``delta_from_baseline()``
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Returns a ``pandas.Series`` of signed improvements relative to the baseline
+mean.  **Positive means the condition is better than baseline**
+(lower loss for ``mode="min"``, higher score for ``mode="max"``).
+
+.. code-block:: python
+
+   delta = results.delta_from_baseline()
+   print(delta)
    # baseline         0.00
-   # no_attention    -0.06
-   # high_dropout    -0.02
-   # small_model     -0.04
+   # no_attention    -0.06   ← removing attention hurts: 0.06 worse
+   # high_dropout    -0.02   ← higher dropout slightly hurts
+   # small_model     -0.04   ← smaller model moderately hurts
+   # Name: delta_val_loss_vs_baseline
 
-   # Access the raw Ray ResultGrid
-   raw = results.raw
-   for r in raw:
-       print(r.config["train_loop_config"]["condition_name"], r.metrics["val_loss"])
+   # Compare a different metric
+   delta_train = results.delta_from_baseline(metric="train_loss")
 
-   # Load the best model for a given condition
+The formula is:
+
+- ``mode="min"``:  ``baseline_mean − condition_mean``  (positive = condition has lower loss)
+- ``mode="max"``:  ``condition_mean − baseline_mean``  (positive = condition has higher score)
+
+``best_checkpoint()``
+^^^^^^^^^^^^^^^^^^^^^
+
+Returns the Ray ``Checkpoint`` for the seed of a given condition that achieved
+the best ``tuner_metric`` value.  Use this to load a trained model:
+
+.. code-block:: python
+
+   import os
+
    ckpt = results.best_checkpoint("no_attention")
    with ckpt.as_directory() as ckpt_dir:
-       model = MyModel.load_from_checkpoint(f"{ckpt_dir}/checkpoint.ckpt")
+       ckpt_path = os.path.join(ckpt_dir, "checkpoint.ckpt")
+       model = MyModel.load_from_checkpoint(ckpt_path)
 
-Testing a condition
-~~~~~~~~~~~~~~~~~~~~
+``raw``
+^^^^^^^
+
+The underlying ``ResultGrid`` is available for direct Ray API access:
 
 .. code-block:: python
 
-   # Test the baseline condition
-   test_metrics = pipeline.run(data=data_module, task="test", condition="baseline")
+   raw = results.raw
 
-   # Test a specific ablation
-   test_metrics = pipeline.run(data=data_module, task="test", condition="no_attention")
+   # Iterate over every trial (all conditions × all seeds)
+   for result in raw:
+       if result.error:
+           continue
+       cfg  = result.config["train_loop_config"]
+       name = cfg["condition_name"]
+       seed = cfg["ablation_seed"]
+       loss = result.metrics["val_loss"]
+       print(f"{name} seed={seed}  val_loss={loss:.4f}")
+
+   # Convert to a flat DataFrame for custom analysis
+   df_all = raw.get_dataframe()
+
+Full analysis workflow
+~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: python
+
+   results = pipeline.run(data=data_module, num_seeds=5, max_epochs=30)
+
+   # 1. Check that all trials succeeded
+   n_errors = sum(1 for r in results.raw if r.error)
+   print(f"{n_errors} failed trials")
+
+   # 2. Per-condition summary
+   summary = results.summary()
+   print(summary[["val_loss_mean", "val_loss_std"]])
+
+   # 3. Rank ablations by impact (most harmful first)
+   delta = results.delta_from_baseline()
+   print(delta.sort_values())          # most negative = most important component
+
+   # 4. Load the best baseline model for further evaluation
+   ckpt = results.best_checkpoint("baseline")
+   with ckpt.as_directory() as d:
+       model = MyModel.load_from_checkpoint(os.path.join(d, "checkpoint.ckpt"))
+
+Evaluating a condition on the test set
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+After an ablation run, call ``pipeline.run(task="test")`` to evaluate a
+specific condition's best checkpoint on the test split.  Pass ``condition``
+to select which condition to test (defaults to ``"baseline"``).
+
+.. code-block:: python
+
+   # Evaluate the baseline
+   test_metrics = pipeline.run(data=data_module, task="test")
+   # → [{"test_loss": 0.043, ...}]
+
+   # Evaluate a specific ablation condition
+   test_metrics = pipeline.run(
+       data=data_module,
+       task="test",
+       condition="no_attention",
+   )
+
+   # Evaluate from an explicit checkpoint path (skips best-checkpoint lookup)
+   test_metrics = pipeline.run(
+       data=data_module,
+       task="test",
+       ckpt_path="runs/ablation/TorchTrainer_xxx/checkpoint.ckpt",
+   )
+
+Using a data factory with ablations
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``data_factory`` parameter works the same as in the hyperparameter search
+pipeline — it is called once per trial and takes precedence over deepcopying
+``data``:
+
+.. code-block:: python
+
+   pipeline.run(
+       data=MyDataModule("data/"),
+       data_factory=lambda: MyDataModule("data/"),
+       num_seeds=5,
+       max_epochs=30,
+   )
+
+Combining ablations with hardware configuration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ablation pipeline shares the same GPU auto-detection logic as
+:class:`RayHyperParameterSearch`.  All hardware options from
+:ref:`section 10 <hardware>` apply directly — pass ``scaling_config``,
+``resources_per_worker``, or ``debug_mode`` as keyword arguments to ``run()``.
+
+.. code-block:: python
+
+   from ray.train import ScalingConfig
+
+   results = pipeline.run(
+       data=data_module,
+       num_seeds=5,
+       max_epochs=50,
+       scaling_config=ScalingConfig(
+           num_workers=1,
+           use_gpu=True,
+           resources_per_worker={"GPU": 0.5},   # 2 trials share 1 GPU
+       ),
+   )
 
 
 15. Minerva integration
 ------------------------
 
-``RayHyperParameterSearch`` is a full Minerva ``Pipeline``, so it inherits
-Minerva's tracking and reproducibility features.
+Both ``RayHyperParameterSearch`` and ``AblationStudyPipeline`` are full Minerva
+``Pipeline`` objects, so they inherit Minerva's tracking and reproducibility
+features.
 
 ``log_dir``
 ~~~~~~~~~~~
@@ -859,3 +1100,63 @@ at search time.
 
    # Wrong: log_dir has no effect here
    pipeline.run(data=data_module, log_dir="runs/exp")
+
+``ValueError: 'baseline' is a reserved condition name``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The key ``"baseline"`` is reserved and added automatically by
+``AblationStudyPipeline``.  Remove it from the ``ablations`` dict you pass to
+the constructor:
+
+.. code-block:: python
+
+   # Wrong
+   AblationStudyPipeline(
+       ...,
+       ablations={"baseline": {...}, "no_attention": {...}},
+   )
+
+   # Correct — baseline is defined via baseline_config, not ablations
+   AblationStudyPipeline(
+       ...,
+       baseline_config={"lr": 1e-3, ...},
+       ablations={"no_attention": {"use_attention": False}},
+   )
+
+``RuntimeError: No ablation results available``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+You called ``pipeline.run(task="test")`` on an ``AblationStudyPipeline`` before
+running the ablation study, and didn't provide ``ckpt_path``.  Either run the
+study first or pass an explicit checkpoint:
+
+.. code-block:: python
+
+   pipeline.run(data=data_module, task="test", ckpt_path="path/to/checkpoint.ckpt")
+
+``KeyError`` in ``delta_from_baseline()``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The metric name passed to ``delta_from_baseline(metric=...)`` was not logged by
+any trial.  Check the column names in ``results.summary()`` — they follow the
+``{metric}_mean`` pattern:
+
+.. code-block:: python
+
+   print(results.summary().columns.tolist())
+   # ['val_loss_mean', 'val_loss_std', 'train_loss_mean', 'train_loss_std', ...]
+
+   # Use the base metric name (without _mean / _std suffix)
+   delta = results.delta_from_baseline(metric="val_loss")   # correct
+   delta = results.delta_from_baseline(metric="val_loss_mean")  # KeyError
+
+``summary()`` returns an empty DataFrame
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+All trials failed.  Check ``results.raw`` for errors:
+
+.. code-block:: python
+
+   for result in results.raw:
+       if result.error:
+           print(result.trial_id, result.error)
