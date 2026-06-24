@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import lightning.pytorch as L
 import pytest
 import torch
+from ray import tune
 
 
 # ---------------------------------------------------------------------------
