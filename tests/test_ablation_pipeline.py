@@ -114,6 +114,53 @@ class TestAblationStudyPipelineInit:
                 ablations={"baseline": {"lr": 1e-2}},
             )
 
+    def test_list_value_expands_conditions(self):
+        from minerva_opt.pipelines.ablation_study import AblationStudyPipeline
+
+        p = AblationStudyPipeline(
+            model=_ToyModel,
+            baseline_config=_BASELINE,
+            ablations={"dropout": {"dropout": [0.2, 0.5, 0.8]}},
+        )
+        assert set(p._conditions.keys()) == {"baseline", "dropout_0.2", "dropout_0.5", "dropout_0.8"}
+
+    def test_list_value_correct_configs(self):
+        from minerva_opt.pipelines.ablation_study import AblationStudyPipeline
+
+        p = AblationStudyPipeline(
+            model=_ToyModel,
+            baseline_config=_BASELINE,
+            ablations={"dropout": {"dropout": [0.2, 0.5, 0.8]}},
+        )
+        assert p._conditions["dropout_0.2"] == {**_BASELINE, "dropout": 0.2}
+        assert p._conditions["dropout_0.5"] == {**_BASELINE, "dropout": 0.5}
+        assert p._conditions["dropout_0.8"] == {**_BASELINE, "dropout": 0.8}
+
+    def test_non_list_ablations_unchanged(self):
+        p = _make_pipeline()
+        assert p._conditions["no_dropout"] == {**_BASELINE, "dropout": 0.0}
+        assert p._conditions["no_bn"] == {**_BASELINE, "use_bn": False}
+
+    def test_multiple_list_keys_raises(self):
+        from minerva_opt.pipelines.ablation_study import AblationStudyPipeline
+
+        with pytest.raises(ValueError, match="multiple list-valued keys"):
+            AblationStudyPipeline(
+                model=_ToyModel,
+                baseline_config=_BASELINE,
+                ablations={"sweep": {"dropout": [0.2, 0.5], "lr": [1e-3, 1e-4]}},
+            )
+
+    def test_empty_list_raises(self):
+        from minerva_opt.pipelines.ablation_study import AblationStudyPipeline
+
+        with pytest.raises(ValueError, match="empty list"):
+            AblationStudyPipeline(
+                model=_ToyModel,
+                baseline_config=_BASELINE,
+                ablations={"dropout": {"dropout": []}},
+            )
+
 
 # ---------------------------------------------------------------------------
 # TestAblationResultsSummary

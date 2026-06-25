@@ -154,6 +154,20 @@ ablations       = {"no_attention": {"use_attention": False}}
 
 The key `"baseline"` is reserved and added automatically — passing it inside `ablations` raises a `ValueError`.
 
+#### Sweeping multiple values for one parameter
+
+To test several values of a single parameter without writing a separate condition for each, pass a **list** as the override value. The pipeline expands it into one named condition per value using the pattern `"{name}_{value}"`:
+
+```python
+ablations = {
+    "dropout": {"dropout": [0.2, 0.5, 0.8]},  # expands to dropout_0.2, dropout_0.5, dropout_0.8
+    "no_attention": {"use_attention": False},
+}
+# Produces 5 conditions total: baseline, dropout_0.2, dropout_0.5, dropout_0.8, no_attention
+```
+
+> **Constraint**: only one key per condition entry may be a list. Passing two list-valued keys in the same entry raises `ValueError` — use separate entries or `RayHyperParameterSearch` for multi-parameter grid search.
+
 #### Running the study
 
 ```python

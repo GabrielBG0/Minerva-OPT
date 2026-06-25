@@ -63,6 +63,17 @@ class AblationStudyPipeline(Pipeline):
             entry's values are merged on top of ``baseline_config`` to form
             the condition's full config.  The key ``"baseline"`` is reserved
             and will raise ``ValueError`` if present.
+
+            A single override value may be a **list** to sweep multiple
+            values for that parameter.  The condition is then expanded into
+            one named condition per value, using the pattern
+            ``"{name}_{value}"``.  For example::
+
+                {"dropout": {"dropout": [0.2, 0.5, 0.8]}}
+
+            produces conditions ``dropout_0.2``, ``dropout_0.5``, and
+            ``dropout_0.8``.  Only one key per condition entry may be a list;
+            passing multiple list-valued keys raises ``ValueError``.
         log_dir : path-like or None, optional
             Directory for Ray storage and run artefacts.  Passed to the base
             ``Pipeline``.
@@ -89,7 +100,26 @@ class AblationStudyPipeline(Pipeline):
 
         self._conditions: Dict[str, Dict[str, Any]] = {"baseline": dict(baseline_config)}
         for name, overrides in ablations.items():
-            self._conditions[name] = {**baseline_config, **overrides}
+            list_keys = [k for k, v in overrides.items() if isinstance(v, list)]
+            if len(list_keys) > 1:
+                raise ValueError(
+                    f"Ablation '{name}' has multiple list-valued keys {list_keys}. "
+                    "Only one parameter may be a list per condition. "
+                    "Use separate ablation entries or HyperparameterOptimizationPipeline "
+                    "for multi-parameter grid search."
+                )
+            if list_keys:
+                key = list_keys[0]
+                values = overrides[key]
+                if not values:
+                    raise ValueError(
+                        f"Ablation '{name}' has an empty list for key '{key}'."
+                    )
+                for val in values:
+                    cond_name = f"{name}_{val}"
+                    self._conditions[cond_name] = {**baseline_config, **overrides, key: val}
+            else:
+                self._conditions[name] = {**baseline_config, **overrides}
 
         self._last_results: Optional[AblationResults] = None
 

@@ -22,6 +22,7 @@ This tutorial walks you through using `minerva-opt` to run hyperparameter search
 14. [Using a Data Factory](#14-using-a-data-factory)
 15. [Minerva Integration](#15-minerva-integration)
 16. [Troubleshooting](#16-troubleshooting)
+17. [Ablation Studies](#17-ablation-studies)
 
 ---
 
@@ -768,3 +769,161 @@ pipeline = RayHyperParameterSearch(model=MyModel, search_space=..., log_dir="run
 # Wrong: log_dir has no effect here
 pipeline.run(data=data_module, log_dir="runs/exp")  # log_dir is not a run() param
 ```
+
+---
+
+## 17. Ablation Studies
+
+`AblationStudyPipeline` answers a different question than hyperparameter search: *how much does each component of my model contribute?* It trains a full-model **baseline** alongside a set of named **ablation conditions** (each being the baseline with one component removed or altered) over multiple random seeds, then aggregates the results so you can compare them with statistical confidence.
+
+### How it works
+
+```
+AblationStudyPipeline.run()
+       │
+       ▼
+  conditions × seeds  (grid — no sampling, no early stopping)
+       │
+       ├── baseline  × seed 0 → train to completion
+       ├── baseline  × seed 1 → train to completion
+       ├── ...
+       ├── no_attention × seed 0 → train to completion
+       ├── no_attention × seed 1 → train to completion
+       └── ...
+       │
+       ▼
+  AblationResults  ←  stored on pipeline._last_results
+```
+
+Every condition × seed pair always trains for the full `max_epochs` — there is no early stopping.
+
+### Defining the pipeline
+
+```python
+from minerva_opt import AblationStudyPipeline
+
+pipeline = AblationStudyPipeline(
+    model=MyLightningModel,      # class, not instance
+    baseline_config={
+        "lr": 1e-3,
+        "dropout": 0.2,
+        "use_attention": True,
+        "hidden_size": 128,
+    },
+    ablations={
+        "no_attention": {"use_attention": False},
+        "high_dropout":  {"dropout": 0.5},
+        "small_model":   {"hidden_size": 64},
+    },
+    log_dir="logs/ablation",
+    seed=0,
+)
+```
+
+Each entry in `ablations` is merged on top of `baseline_config`. The name `"baseline"` is reserved and added automatically.
+
+### Running the study
+
+```python
+# 4 conditions × 5 seeds = 20 trials
+results = pipeline.run(
+    data=my_data_module,
+    num_seeds=5,
+    max_epochs=30,
+    tuner_metric="val_loss",
+    tuner_mode="min",
+)
+```
+
+### Sweeping multiple values for one parameter
+
+To test several values of a single parameter, pass a **list** as the override value. The pipeline expands it into one condition per value, named `"{key}_{value}"`:
+
+```python
+ablations = {
+    "dropout": {"dropout": [0.2, 0.5, 0.8]},  # → dropout_0.2, dropout_0.5, dropout_0.8
+    "no_attention": {"use_attention": False},
+}
+# 5 conditions × 5 seeds = 25 trials
+```
+
+This is useful for sensitivity analysis — you can see not just *whether* dropout matters, but *how much* each value affects performance.
+
+> **Constraint**: only one key per condition entry may be a list. Mixing two list-valued keys in the same entry raises `ValueError`. For multi-parameter sweeps, use `RayHyperParameterSearch` with `tune.grid_search`.
+
+### Analysing results
+
+`pipeline.run()` returns an `AblationResults` object:
+
+```python
+# Mean ± std per condition across all seeds
+print(results.summary())
+#                val_loss_mean  val_loss_std
+# baseline                0.21          0.01
+# no_attention            0.27          0.02
+# high_dropout            0.23          0.01
+# dropout_0.2             0.22          0.01
+# dropout_0.5             0.23          0.01
+# dropout_0.8             0.26          0.02
+# small_model             0.25          0.02
+
+# Signed delta vs baseline (negative = worse than baseline)
+print(results.delta_from_baseline())
+# baseline         0.00
+# no_attention    -0.06   ← removing attention hurts the most
+# high_dropout    -0.02
+# dropout_0.2     -0.01
+# dropout_0.5     -0.02
+# dropout_0.8     -0.05
+# small_model     -0.04
+
+# Rank by impact
+delta = results.delta_from_baseline()
+print(delta.sort_values())   # most negative = most important component
+
+# Raw Ray ResultGrid for custom analysis
+for r in results.raw:
+    cfg = r.config["train_loop_config"]
+    print(cfg["condition_name"], cfg["ablation_seed"], r.metrics["val_loss"])
+```
+
+### Loading a condition's best checkpoint
+
+```python
+import os
+
+ckpt = results.best_checkpoint("no_attention")
+with ckpt.as_directory() as ckpt_dir:
+    model = MyLightningModel.load_from_checkpoint(
+        os.path.join(ckpt_dir, "checkpoint.ckpt")
+    )
+```
+
+### Testing a condition on the test set
+
+```python
+# Evaluate the baseline (default)
+pipeline.run(data=my_data_module, task="test")
+
+# Evaluate a specific condition
+pipeline.run(data=my_data_module, task="test", condition="no_attention")
+```
+
+### Key `run()` parameters
+
+| Parameter                 | Default      | Description                                                |
+| ------------------------- | ------------ | ---------------------------------------------------------- |
+| `data`                    | —            | `LightningDataModule` for training and testing             |
+| `task`                    | `"ablate"`   | `"ablate"` to run the study, `"test"` to evaluate          |
+| `num_seeds`               | `5`          | Independent seeds per condition                            |
+| `max_epochs`              | `100`        | Training epochs per trial (no early stopping)              |
+| `tuner_metric`            | `"val_loss"` | Metric logged by the model and used to rank seeds          |
+| `tuner_mode`              | `"min"`      | `"min"` or `"max"`                                         |
+| `ckpt_path`               | `None`       | Optional warm-start checkpoint forwarded to `trainer.fit`  |
+| `condition`               | `"baseline"` | Which condition to evaluate when `task="test"`             |
+| `data_factory`            | `None`       | Callable returning a fresh `LightningDataModule` per trial |
+| `scaling_config`          | Auto-detected| Ray `ScalingConfig`                                        |
+| `resources_per_worker`    | `{"GPU": 1}` | GPU resource dict used when auto-creating `ScalingConfig`  |
+| `checkpoint_interval`     | `1`          | Save a checkpoint every N epochs                           |
+| `num_checkpoints_to_keep` | `1`          | Checkpoints retained per trial                             |
+| `debug_mode`              | `False`      | Disables checkpointing for fast iteration                  |
